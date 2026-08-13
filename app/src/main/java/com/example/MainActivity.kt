@@ -1244,6 +1244,36 @@ suspend fun fetchRealTimeData(ticker: String): String {
 }
 
 @Composable
+fun BreakoutSectionHeader(
+    title: String,
+    subtitle: String,
+    color: Color
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 2.dp, top = 12.dp, end = 2.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(
+                text = title,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Black,
+                color = color
+            )
+            Text(
+                text = subtitle,
+                fontSize = 9.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = Color(0xFF64748B)
+            )
+        }
+    }
+}
+
+@Composable
 fun StockBreakoutCard(
     res: ScanResult,
     onSymbolSelected: (String) -> Unit,
@@ -2043,63 +2073,143 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
                     }
                 }
             } else {
-                val filteredResults = remember(scanResults, selectedCategory) {
-                    when (selectedCategory) {
-                        "TOP_STOCKS" -> scanResults.filter { it.categoryGroup == "Top 5 Breakout Stocks" }
-                        "INDICES" -> scanResults.filter { it.categoryGroup == "Top 2 Indices" || it.assetType == "INDEX" }
-                        "COMMODITIES" -> scanResults.filter { it.categoryGroup == "Top 2 Commodities" || it.assetType == "COMMODITY" }
-                        "BTST" -> scanResults.filter { it.categoryGroup == "5 Best BTST Stocks" || it.isBtst }
-                        "WEEKLY" -> scanResults.filter { it.categoryGroup == "5 Best Weekly Stocks" }
-                        else -> scanResults
-                    }
+                val top5Stocks = remember(scanResults) { scanResults.filter { it.categoryGroup == "Top 5 Breakout Stocks" } }
+                val top2Indices = remember(scanResults) { scanResults.filter { it.categoryGroup == "Top 2 Indices" || (it.categoryGroup.isNullOrBlank() && it.assetType == "INDEX") } }
+                val top2Commodities = remember(scanResults) { scanResults.filter { it.categoryGroup == "Top 2 Commodities" || (it.categoryGroup.isNullOrBlank() && it.assetType == "COMMODITY") } }
+                val top5Btst = remember(scanResults) { scanResults.filter { it.categoryGroup == "5 Best BTST Stocks" || (it.categoryGroup.isNullOrBlank() && it.isBtst) } }
+                val top5Weekly = remember(scanResults) { scanResults.filter { it.categoryGroup == "5 Best Weekly Stocks" } }
+
+                val categorizedTickers = remember(top5Stocks, top2Indices, top2Commodities, top5Btst, top5Weekly) {
+                    (top5Stocks + top2Indices + top2Commodities + top5Btst + top5Weekly).map { it.ticker }.toSet()
+                }
+                val otherBreakouts = remember(scanResults, categorizedTickers) {
+                    scanResults.filter { !categorizedTickers.contains(it.ticker) }
                 }
 
-                Column(modifier = Modifier.fillMaxSize()) {
-                    // Category Chips selector for Top Breakouts
-                    LazyRow(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        val categories = listOf(
-                            Pair("ALL", "All 19 Curated"),
-                            Pair("TOP_STOCKS", "Top 5 Nifty 200"),
-                            Pair("INDICES", "Top 2 Indices"),
-                            Pair("COMMODITIES", "Top 2 Commodities"),
-                            Pair("BTST", "5 Best BTST"),
-                            Pair("WEEKLY", "5 Best Weekly")
-                        )
-                        items(categories) { (catKey, catLabel) ->
-                            val isSelected = selectedCategory == catKey
-                            Surface(
-                                onClick = { selectedCategory = catKey },
-                                shape = RoundedCornerShape(20.dp),
-                                color = if (isSelected) Color(0xFF7C3AED) else Color.White,
-                                border = BorderStroke(1.dp, if (isSelected) Color(0xFF7C3AED) else Color(0xFFCBD5E1))
-                            ) {
-                                Text(
-                                    text = catLabel,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) Color.White else Color(0xFF475569),
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                                )
-                            }
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 32.dp)
+                ) {
+                    // 1. Top 5 Nifty 200 Stocks
+                    if (top5Stocks.isNotEmpty()) {
+                        item(span = { GridItemSpan(2) }) {
+                            BreakoutSectionHeader(
+                                title = "🔥 TOP 5 NIFTY 200 STOCKS",
+                                subtitle = "High volume 52W high resistance breakouts",
+                                color = Color(0xFF10B981)
+                            )
+                        }
+                        items(top5Stocks, key = { "top5_${it.ticker}" }) { res ->
+                            StockBreakoutCard(
+                                res = res,
+                                onSymbolSelected = { ticker ->
+                                    selectedStockForAnalysis = ticker
+                                    onSymbolSelected(ticker)
+                                    activeSubTab = "ANALYSIS"
+                                }
+                            )
                         }
                     }
 
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .padding(start = 8.dp, top = 2.dp, end = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        contentPadding = PaddingValues(bottom = 24.dp)
-                    ) {
-                        items(filteredResults, key = { it.ticker }) { res ->
+                    // 2. Top 2 Indices
+                    if (top2Indices.isNotEmpty()) {
+                        item(span = { GridItemSpan(2) }) {
+                            BreakoutSectionHeader(
+                                title = "📈 TOP 2 INDICES",
+                                subtitle = "Major benchmark momentum index breakouts",
+                                color = Color(0xFF0284C7)
+                            )
+                        }
+                        items(top2Indices, key = { "idx_${it.ticker}" }) { res ->
+                            StockBreakoutCard(
+                                res = res,
+                                onSymbolSelected = { ticker ->
+                                    selectedStockForAnalysis = ticker
+                                    onSymbolSelected(ticker)
+                                    activeSubTab = "ANALYSIS"
+                                }
+                            )
+                        }
+                    }
+
+                    // 3. Top 2 Commodities
+                    if (top2Commodities.isNotEmpty()) {
+                        item(span = { GridItemSpan(2) }) {
+                            BreakoutSectionHeader(
+                                title = "⚡ TOP 2 COMMODITIES",
+                                subtitle = "MCX Metals & Energy breakout triggers",
+                                color = Color(0xFFD97706)
+                            )
+                        }
+                        items(top2Commodities, key = { "cmd_${it.ticker}" }) { res ->
+                            StockBreakoutCard(
+                                res = res,
+                                onSymbolSelected = { ticker ->
+                                    selectedStockForAnalysis = ticker
+                                    onSymbolSelected(ticker)
+                                    activeSubTab = "ANALYSIS"
+                                }
+                            )
+                        }
+                    }
+
+                    // 4. 5 Best BTST Stocks
+                    if (top5Btst.isNotEmpty()) {
+                        item(span = { GridItemSpan(2) }) {
+                            BreakoutSectionHeader(
+                                title = "🌙 5 BEST BTST STOCKS",
+                                subtitle = "Buy Today Sell Tomorrow momentum candidates",
+                                color = Color(0xFF7C3AED)
+                            )
+                        }
+                        items(top5Btst, key = { "btst_${it.ticker}" }) { res ->
+                            StockBreakoutCard(
+                                res = res,
+                                onSymbolSelected = { ticker ->
+                                    selectedStockForAnalysis = ticker
+                                    onSymbolSelected(ticker)
+                                    activeSubTab = "ANALYSIS"
+                                }
+                            )
+                        }
+                    }
+
+                    // 5. 5 Best Weekly Stocks
+                    if (top5Weekly.isNotEmpty()) {
+                        item(span = { GridItemSpan(2) }) {
+                            BreakoutSectionHeader(
+                                title = "📅 5 BEST WEEKLY STOCKS",
+                                subtitle = "Multi-day trend & weekly channel breakouts",
+                                color = Color(0xFF059669)
+                            )
+                        }
+                        items(top5Weekly, key = { "weekly_${it.ticker}" }) { res ->
+                            StockBreakoutCard(
+                                res = res,
+                                onSymbolSelected = { ticker ->
+                                    selectedStockForAnalysis = ticker
+                                    onSymbolSelected(ticker)
+                                    activeSubTab = "ANALYSIS"
+                                }
+                            )
+                        }
+                    }
+
+                    // Other Breakouts fallback
+                    if (otherBreakouts.isNotEmpty()) {
+                        item(span = { GridItemSpan(2) }) {
+                            BreakoutSectionHeader(
+                                title = "📊 ADDITIONAL BREAKOUTS",
+                                subtitle = "Other active momentum signals",
+                                color = Color(0xFF475569)
+                            )
+                        }
+                        items(otherBreakouts, key = { "other_${it.ticker}" }) { res ->
                             StockBreakoutCard(
                                 res = res,
                                 onSymbolSelected = { ticker ->
