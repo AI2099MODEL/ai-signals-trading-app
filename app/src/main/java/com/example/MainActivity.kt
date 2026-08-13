@@ -2089,42 +2089,6 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
                         }
                     }
 
-                    // Banner for Curated Market Breakouts
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1B4B)),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Text("🔥 CURATED NON-OVERLAPPING BREAKOUTS", fontSize = 11.5.sp, fontWeight = FontWeight.Black, color = Color(0xFF38BDF8))
-                                    Surface(
-                                        color = Color(0xFF0284C7),
-                                        shape = RoundedCornerShape(4.dp)
-                                    ) {
-                                        Text("CTEST AI FILTERED", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
-                                    }
-                                }
-                                Text("5 Top Stocks • 2 Indices • 2 Commodities • 5 BTST • 5 Weekly (No Duplicates)", fontSize = 9.sp, color = Color(0xFF94A3B8))
-                            }
-                            Icon(
-                                imageVector = Icons.Default.AutoGraph,
-                                contentDescription = null,
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
-
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier
