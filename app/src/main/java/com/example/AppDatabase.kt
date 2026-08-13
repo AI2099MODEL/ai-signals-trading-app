@@ -31,6 +31,7 @@ data class ScannedBreakout(
     val changePercent: Double,
     val isBtst: Boolean,
     val assetType: String = "COMMODITY",
+    val categoryGroup: String = "Top 5 Breakout Stocks",
     val scannedAt: Long = System.currentTimeMillis()
 )
 
@@ -142,7 +143,7 @@ interface ProfitLogDao {
     suspend fun clearAllLogs()
 }
 
-@Database(entities = [PriceAlert::class, ScannedBreakout::class, VirtualTrade::class, ProfitLog::class], version = 7, exportSchema = false)
+@Database(entities = [PriceAlert::class, ScannedBreakout::class, VirtualTrade::class, ProfitLog::class], version = 8, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun priceAlertDao(): PriceAlertDao
     abstract fun scannedBreakoutDao(): ScannedBreakoutDao

@@ -62,6 +62,7 @@ data class SupabaseBreakoutDto(
     @Json(name = "changePercent") val changePercent: Double,
     @Json(name = "isBtst") val isBtst: Boolean,
     @Json(name = "assetType") val assetType: String,
+    @Json(name = "categoryGroup") val categoryGroup: String? = "Top 5 Breakout Stocks",
     @Json(name = "scannedAt") val scannedAt: Long
 )
 
@@ -130,6 +131,7 @@ fun ScannedBreakout.toSupabaseDto(): SupabaseBreakoutDto {
         changePercent = changePercent,
         isBtst = isBtst,
         assetType = assetType,
+        categoryGroup = categoryGroup,
         scannedAt = scannedAt
     )
 }
@@ -152,6 +154,7 @@ fun SupabaseBreakoutDto.toScannedBreakout(): ScannedBreakout {
         changePercent = changePercent,
         isBtst = isBtst,
         assetType = assetType,
+        categoryGroup = categoryGroup ?: "Top 5 Breakout Stocks",
         scannedAt = scannedAt
     )
 }

@@ -1304,22 +1304,40 @@ fun StockBreakoutCard(
             val timeInMins = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
             val isOptionsMarketClosed = (timeInMins >= 900 || timeInMins < 555)
 
-            val badgeText = when {
-                res.assetType == "INDEX_OPTION" || res.assetType == "STOCK_OPTION" -> {
-                    if (isOptionsMarketClosed) "INTRADAY • STARTS 9:15 AM" else "INTRADAY OPTION"
+            val badgeText = when (res.categoryGroup) {
+                "Top 5 Breakout Stocks" -> "🔥 TOP 5 BREAKOUT"
+                "Top 2 Indices" -> "📈 TOP INDEX"
+                "Top 2 Commodities" -> "⚡ MCX COMMODITY"
+                "5 Best BTST Stocks" -> "🌙 5 BEST BTST"
+                "5 Best Weekly Stocks" -> "📅 5 BEST WEEKLY"
+                else -> {
+                    when {
+                        res.assetType == "INDEX_OPTION" || res.assetType == "STOCK_OPTION" -> {
+                            if (isOptionsMarketClosed) "INTRADAY • STARTS 9:15 AM" else "INTRADAY OPTION"
+                        }
+                        res.isBtst && res.assetType == "EQUITY" -> "BTST ELIGIBLE (EQUITY)"
+                        res.assetType == "COMMODITY" -> "MCX • ${res.signalStrength.uppercase()}"
+                        else -> res.signalStrength.ifBlank { "BREAKOUT" }.uppercase()
+                    }
                 }
-                res.isBtst && res.assetType == "EQUITY" -> "BTST ELIGIBLE (EQUITY)"
-                res.assetType == "COMMODITY" -> "MCX • ${res.signalStrength.uppercase()}"
-                else -> res.signalStrength.ifBlank { "BREAKOUT" }.uppercase()
             }
 
-            val badgeBg = when {
-                res.assetType == "INDEX_OPTION" || res.assetType == "STOCK_OPTION" -> {
-                    if (isOptionsMarketClosed) Color(0xFF64748B) else Color(0xFF0284C7)
+            val badgeBg = when (res.categoryGroup) {
+                "Top 5 Breakout Stocks" -> Color(0xFF10B981)
+                "Top 2 Indices" -> Color(0xFF0284C7)
+                "Top 2 Commodities" -> Color(0xFFD97706)
+                "5 Best BTST Stocks" -> Color(0xFF7C3AED)
+                "5 Best Weekly Stocks" -> Color(0xFF059669)
+                else -> {
+                    when {
+                        res.assetType == "INDEX_OPTION" || res.assetType == "STOCK_OPTION" -> {
+                            if (isOptionsMarketClosed) Color(0xFF64748B) else Color(0xFF0284C7)
+                        }
+                        res.isBtst && res.assetType == "EQUITY" -> Color(0xFF7C3AED)
+                        res.assetType == "COMMODITY" -> Color(0xFFD97706)
+                        else -> StrongBreakoutGreen
+                    }
                 }
-                res.isBtst && res.assetType == "EQUITY" -> Color(0xFF7C3AED)
-                res.assetType == "COMMODITY" -> Color(0xFFD97706)
-                else -> StrongBreakoutGreen
             }
 
             Row(
@@ -1760,7 +1778,8 @@ fun ScannedBreakout.toScanResult() = ScanResult(
     change = change,
     changePercent = changePercent,
     isBtst = isBtst,
-    assetType = assetType
+    assetType = assetType,
+    categoryGroup = categoryGroup
 )
 
 fun ScanResult.toScannedBreakout() = ScannedBreakout(
@@ -1779,7 +1798,8 @@ fun ScanResult.toScannedBreakout() = ScannedBreakout(
     change = change,
     changePercent = changePercent,
     isBtst = isBtst,
-    assetType = assetType
+    assetType = assetType,
+    categoryGroup = categoryGroup
 )
 
 @Composable
@@ -2025,19 +2045,13 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
             } else {
                 val filteredResults = remember(scanResults, selectedCategory) {
                     when (selectedCategory) {
-                        "EQUITY" -> scanResults.filter { it.assetType == "EQUITY" }
-                        "COMMODITY" -> scanResults.filter { it.assetType == "COMMODITY" }
-                        "INDEX" -> scanResults.filter { it.assetType == "INDEX" }
-                        "BTST" -> scanResults.filter { it.isBtst }
+                        "TOP_STOCKS" -> scanResults.filter { it.categoryGroup == "Top 5 Breakout Stocks" }
+                        "INDICES" -> scanResults.filter { it.categoryGroup == "Top 2 Indices" || it.assetType == "INDEX" }
+                        "COMMODITIES" -> scanResults.filter { it.categoryGroup == "Top 2 Commodities" || it.assetType == "COMMODITY" }
+                        "BTST" -> scanResults.filter { it.categoryGroup == "5 Best BTST Stocks" || it.isBtst }
+                        "WEEKLY" -> scanResults.filter { it.categoryGroup == "5 Best Weekly Stocks" }
                         else -> scanResults
                     }
-                }
-
-                val top10Nifty200 = remember(scanResults) {
-                    scanResults.filter { it.assetType == "EQUITY" }
-                        .sortedByDescending { it.score }
-                        .take(10)
-                        .mapIndexed { idx, item -> item.copy(rank = idx + 1) }
                 }
 
                 Column(modifier = Modifier.fillMaxSize()) {
@@ -2049,11 +2063,12 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         val categories = listOf(
-                            Pair("ALL", "All Breakouts"),
-                            Pair("EQUITY", "Top 10 Nifty 200"),
-                            Pair("COMMODITY", "MCX Commodities"),
-                            Pair("INDEX", "Key Indices"),
-                            Pair("BTST", "BTST Momentum")
+                            Pair("ALL", "All 19 Curated"),
+                            Pair("TOP_STOCKS", "Top 5 Stocks"),
+                            Pair("INDICES", "Top 2 Indices"),
+                            Pair("COMMODITIES", "Top 2 Commodities"),
+                            Pair("BTST", "5 Best BTST"),
+                            Pair("WEEKLY", "5 Best Weekly")
                         )
                         items(categories) { (catKey, catLabel) ->
                             val isSelected = selectedCategory == catKey
@@ -2074,41 +2089,39 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
                         }
                     }
 
-                    // Banner for Top 10 Nifty 200 Analysis
-                    if (selectedCategory == "ALL" || selectedCategory == "EQUITY") {
-                        Card(
+                    // Banner for Curated Market Breakouts
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1B4B)),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 4.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1B4B)),
-                            shape = RoundedCornerShape(10.dp)
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(10.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        Text("🔥 TOP 10 NIFTY 200 BREAKOUTS", fontSize = 12.sp, fontWeight = FontWeight.Black, color = Color(0xFF38BDF8))
-                                        Surface(
-                                            color = Color(0xFF0284C7),
-                                            shape = RoundedCornerShape(4.dp)
-                                        ) {
-                                            Text("CTEST AI ANALYZED", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
-                                        }
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("🔥 CURATED NON-OVERLAPPING BREAKOUTS", fontSize = 11.5.sp, fontWeight = FontWeight.Black, color = Color(0xFF38BDF8))
+                                    Surface(
+                                        color = Color(0xFF0284C7),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text("CTEST AI FILTERED", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
                                     }
-                                    Text("Scanned across 200 large-cap stocks via 52W High & Volume Surge algorithm", fontSize = 9.5.sp, color = Color(0xFF94A3B8))
                                 }
-                                Icon(
-                                    imageVector = Icons.Default.AutoGraph,
-                                    contentDescription = null,
-                                    tint = Color(0xFF38BDF8),
-                                    modifier = Modifier.size(22.dp)
-                                )
+                                Text("5 Top Stocks • 2 Indices • 2 Commodities • 5 BTST • 5 Weekly (No Duplicates)", fontSize = 9.sp, color = Color(0xFF94A3B8))
                             }
+                            Icon(
+                                imageVector = Icons.Default.AutoGraph,
+                                contentDescription = null,
+                                tint = Color(0xFF38BDF8),
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
                     }
 
@@ -2122,7 +2135,7 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         contentPadding = PaddingValues(bottom = 24.dp)
                     ) {
-                        items(if (selectedCategory == "EQUITY") top10Nifty200 else filteredResults, key = { it.ticker }) { res ->
+                        items(filteredResults, key = { it.ticker }) { res ->
                             StockBreakoutCard(
                                 res = res,
                                 onSymbolSelected = { ticker ->

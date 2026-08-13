@@ -29,7 +29,8 @@ data class ScanResult(
     val changePercent: Double = 0.0,
     val isBtst: Boolean = false,
     val assetType: String = "EQUITY", // EQUITY, COMMODITY, INDEX
-    val rank: Int = 0
+    val rank: Int = 0,
+    val categoryGroup: String = "Top 5 Breakout Stocks"
 )
 
 object StockScanner {
@@ -335,7 +336,85 @@ object StockScanner {
             )
         }
 
-        results.sortedByDescending { it.score }.mapIndexed { index, res ->
+        val allScanned = results.sortedByDescending { it.score }
+        
+        // Curate into 5 distinct non-overlapping categories as explicitly requested
+        val usedTickers = mutableSetOf<String>()
+
+        // 1. Select Best 5 Stocks with top breakouts
+        val top5BreakoutStocks = allScanned
+            .filter { it.assetType == "EQUITY" }
+            .sortedByDescending { it.score }
+            .take(5)
+            .mapIndexed { idx, item ->
+                item.copy(
+                    rank = idx + 1,
+                    categoryGroup = "Top 5 Breakout Stocks"
+                )
+            }
+        top5BreakoutStocks.forEach { usedTickers.add(it.ticker.uppercase()) }
+
+        // 2. Select 2 Indices
+        val top2Indices = allScanned
+            .filter { it.assetType == "INDEX" && !usedTickers.contains(it.ticker.uppercase()) }
+            .sortedByDescending { it.score }
+            .take(2)
+            .mapIndexed { idx, item ->
+                item.copy(
+                    rank = idx + 1,
+                    categoryGroup = "Top 2 Indices"
+                )
+            }
+        top2Indices.forEach { usedTickers.add(it.ticker.uppercase()) }
+
+        // 3. Select 2 Commodities
+        val top2Commodities = allScanned
+            .filter { it.assetType == "COMMODITY" && !usedTickers.contains(it.ticker.uppercase()) }
+            .sortedByDescending { it.score }
+            .take(2)
+            .mapIndexed { idx, item ->
+                item.copy(
+                    rank = idx + 1,
+                    categoryGroup = "Top 2 Commodities"
+                )
+            }
+        top2Commodities.forEach { usedTickers.add(it.ticker.uppercase()) }
+
+        // 4. Select 5 Best BTST Stocks (equity stocks with high momentum not already used)
+        val top5BtstStocks = allScanned
+            .filter { 
+                it.assetType == "EQUITY" && 
+                !usedTickers.contains(it.ticker.uppercase())
+            }
+            .sortedByDescending { kotlin.math.abs(it.changePercent) * 20 + it.score }
+            .take(5)
+            .mapIndexed { idx, item ->
+                item.copy(
+                    rank = idx + 1,
+                    isBtst = true,
+                    categoryGroup = "5 Best BTST Stocks"
+                )
+            }
+        top5BtstStocks.forEach { usedTickers.add(it.ticker.uppercase()) }
+
+        // 5. Select 5 Best Weekly Stocks (equity stocks not already used)
+        val top5WeeklyStocks = allScanned
+            .filter { 
+                it.assetType == "EQUITY" && 
+                !usedTickers.contains(it.ticker.uppercase())
+            }
+            .sortedByDescending { it.score }
+            .take(5)
+            .mapIndexed { idx, item ->
+                item.copy(
+                    rank = idx + 1,
+                    categoryGroup = "5 Best Weekly Stocks"
+                )
+            }
+        top5WeeklyStocks.forEach { usedTickers.add(it.ticker.uppercase()) }
+
+        val curated = top5BreakoutStocks + top2Indices + top2Commodities + top5BtstStocks + top5WeeklyStocks
+        curated.mapIndexed { index, res ->
             res.copy(rank = index + 1)
         }
     }
