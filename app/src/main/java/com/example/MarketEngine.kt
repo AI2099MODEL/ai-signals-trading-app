@@ -527,6 +527,7 @@ object MarketEngine {
                             changePercent = candidate.changePercent,
                             isBtst = candidate.isBtst,
                             assetType = candidate.assetType,
+                            categoryGroup = candidate.categoryGroup,
                             scannedAt = System.currentTimeMillis()
                         )
                     }

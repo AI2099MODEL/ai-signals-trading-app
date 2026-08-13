@@ -1305,7 +1305,7 @@ fun StockBreakoutCard(
             val isOptionsMarketClosed = (timeInMins >= 900 || timeInMins < 555)
 
             val badgeText = when (res.categoryGroup) {
-                "Top 5 Breakout Stocks" -> "🔥 TOP 5 BREAKOUT"
+                "Top 5 Breakout Stocks" -> "🔥 TOP 5 NIFTY 200"
                 "Top 2 Indices" -> "📈 TOP INDEX"
                 "Top 2 Commodities" -> "⚡ MCX COMMODITY"
                 "5 Best BTST Stocks" -> "🌙 5 BEST BTST"
@@ -2064,7 +2064,7 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
                     ) {
                         val categories = listOf(
                             Pair("ALL", "All 19 Curated"),
-                            Pair("TOP_STOCKS", "Top 5 Stocks"),
+                            Pair("TOP_STOCKS", "Top 5 Nifty 200"),
                             Pair("INDICES", "Top 2 Indices"),
                             Pair("COMMODITIES", "Top 2 Commodities"),
                             Pair("BTST", "5 Best BTST"),
