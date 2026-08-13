@@ -2073,19 +2073,6 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
                     }
                 }
             } else {
-                val top5Stocks = remember(scanResults) { scanResults.filter { it.categoryGroup == "Top 5 Breakout Stocks" } }
-                val top2Indices = remember(scanResults) { scanResults.filter { it.categoryGroup == "Top 2 Indices" || (it.categoryGroup.isNullOrBlank() && it.assetType == "INDEX") } }
-                val top2Commodities = remember(scanResults) { scanResults.filter { it.categoryGroup == "Top 2 Commodities" || (it.categoryGroup.isNullOrBlank() && it.assetType == "COMMODITY") } }
-                val top5Btst = remember(scanResults) { scanResults.filter { it.categoryGroup == "5 Best BTST Stocks" || (it.categoryGroup.isNullOrBlank() && it.isBtst) } }
-                val top5Weekly = remember(scanResults) { scanResults.filter { it.categoryGroup == "5 Best Weekly Stocks" } }
-
-                val categorizedTickers = remember(top5Stocks, top2Indices, top2Commodities, top5Btst, top5Weekly) {
-                    (top5Stocks + top2Indices + top2Commodities + top5Btst + top5Weekly).map { it.ticker }.toSet()
-                }
-                val otherBreakouts = remember(scanResults, categorizedTickers) {
-                    scanResults.filter { !categorizedTickers.contains(it.ticker) }
-                }
-
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier
@@ -2095,130 +2082,15 @@ fun DashboardScreen(modifier: Modifier = Modifier, onSymbolSelected: (String) ->
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(bottom = 32.dp)
                 ) {
-                    // 1. Top 5 Nifty 200 Stocks
-                    if (top5Stocks.isNotEmpty()) {
-                        item(span = { GridItemSpan(2) }) {
-                            BreakoutSectionHeader(
-                                title = "🔥 TOP 5 NIFTY 200 STOCKS",
-                                subtitle = "High volume 52W high resistance breakouts",
-                                color = Color(0xFF10B981)
-                            )
-                        }
-                        items(top5Stocks, key = { "top5_${it.ticker}" }) { res ->
-                            StockBreakoutCard(
-                                res = res,
-                                onSymbolSelected = { ticker ->
-                                    selectedStockForAnalysis = ticker
-                                    onSymbolSelected(ticker)
-                                    activeSubTab = "ANALYSIS"
-                                }
-                            )
-                        }
-                    }
-
-                    // 2. Top 2 Indices
-                    if (top2Indices.isNotEmpty()) {
-                        item(span = { GridItemSpan(2) }) {
-                            BreakoutSectionHeader(
-                                title = "📈 TOP 2 INDICES",
-                                subtitle = "Major benchmark momentum index breakouts",
-                                color = Color(0xFF0284C7)
-                            )
-                        }
-                        items(top2Indices, key = { "idx_${it.ticker}" }) { res ->
-                            StockBreakoutCard(
-                                res = res,
-                                onSymbolSelected = { ticker ->
-                                    selectedStockForAnalysis = ticker
-                                    onSymbolSelected(ticker)
-                                    activeSubTab = "ANALYSIS"
-                                }
-                            )
-                        }
-                    }
-
-                    // 3. Top 2 Commodities
-                    if (top2Commodities.isNotEmpty()) {
-                        item(span = { GridItemSpan(2) }) {
-                            BreakoutSectionHeader(
-                                title = "⚡ TOP 2 COMMODITIES",
-                                subtitle = "MCX Metals & Energy breakout triggers",
-                                color = Color(0xFFD97706)
-                            )
-                        }
-                        items(top2Commodities, key = { "cmd_${it.ticker}" }) { res ->
-                            StockBreakoutCard(
-                                res = res,
-                                onSymbolSelected = { ticker ->
-                                    selectedStockForAnalysis = ticker
-                                    onSymbolSelected(ticker)
-                                    activeSubTab = "ANALYSIS"
-                                }
-                            )
-                        }
-                    }
-
-                    // 4. 5 Best BTST Stocks
-                    if (top5Btst.isNotEmpty()) {
-                        item(span = { GridItemSpan(2) }) {
-                            BreakoutSectionHeader(
-                                title = "🌙 5 BEST BTST STOCKS",
-                                subtitle = "Buy Today Sell Tomorrow momentum candidates",
-                                color = Color(0xFF7C3AED)
-                            )
-                        }
-                        items(top5Btst, key = { "btst_${it.ticker}" }) { res ->
-                            StockBreakoutCard(
-                                res = res,
-                                onSymbolSelected = { ticker ->
-                                    selectedStockForAnalysis = ticker
-                                    onSymbolSelected(ticker)
-                                    activeSubTab = "ANALYSIS"
-                                }
-                            )
-                        }
-                    }
-
-                    // 5. 5 Best Weekly Stocks
-                    if (top5Weekly.isNotEmpty()) {
-                        item(span = { GridItemSpan(2) }) {
-                            BreakoutSectionHeader(
-                                title = "📅 5 BEST WEEKLY STOCKS",
-                                subtitle = "Multi-day trend & weekly channel breakouts",
-                                color = Color(0xFF059669)
-                            )
-                        }
-                        items(top5Weekly, key = { "weekly_${it.ticker}" }) { res ->
-                            StockBreakoutCard(
-                                res = res,
-                                onSymbolSelected = { ticker ->
-                                    selectedStockForAnalysis = ticker
-                                    onSymbolSelected(ticker)
-                                    activeSubTab = "ANALYSIS"
-                                }
-                            )
-                        }
-                    }
-
-                    // Other Breakouts fallback
-                    if (otherBreakouts.isNotEmpty()) {
-                        item(span = { GridItemSpan(2) }) {
-                            BreakoutSectionHeader(
-                                title = "📊 ADDITIONAL BREAKOUTS",
-                                subtitle = "Other active momentum signals",
-                                color = Color(0xFF475569)
-                            )
-                        }
-                        items(otherBreakouts, key = { "other_${it.ticker}" }) { res ->
-                            StockBreakoutCard(
-                                res = res,
-                                onSymbolSelected = { ticker ->
-                                    selectedStockForAnalysis = ticker
-                                    onSymbolSelected(ticker)
-                                    activeSubTab = "ANALYSIS"
-                                }
-                            )
-                        }
+                    items(scanResults, key = { it.ticker }) { res ->
+                        StockBreakoutCard(
+                            res = res,
+                            onSymbolSelected = { ticker ->
+                                selectedStockForAnalysis = ticker
+                                onSymbolSelected(ticker)
+                                activeSubTab = "ANALYSIS"
+                            }
+                        )
                     }
                 }
             }

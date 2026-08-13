@@ -297,116 +297,16 @@ object StockScanner {
         }
         results.addAll(nifty200Deferreds.awaitAll())
 
-        // 3. Scan Key Indices
-        FEATURED_INDICES.forEachIndexed { idx, (sym, name, basePx) ->
-            val changePct = if (idx == 0) 0.95 else if (idx == 1) 1.35 else 0.82
-            val currentPrice = basePx * (1.0 + changePct / 100.0)
-            val change = currentPrice - basePx
-
-            results.add(
-                ScanResult(
-                    ticker = sym,
-                    name = name,
-                    price = currentPrice,
-                    strategies = "CTEST: INTRADAY, Channel Breakout",
-                    score = 88 + idx,
-                    reasons = "• Index testing upper Bollinger band\n• Banking & Heavyweight rally momentum",
-                    signalStrength = "STRONG BULLISH",
-                    stopLoss = currentPrice * 0.992,
-                    target1 = currentPrice * 1.015,
-                    target2 = currentPrice * 1.030,
-                    historicalPrices = listOf(basePx, basePx * 1.002, currentPrice),
-                    previousClose = basePx,
-                    openPrice = basePx * 0.999,
-                    change = change,
-                    changePercent = changePct,
-                    isBtst = true,
-                    assetType = "INDEX"
-                )
-            )
-        }
-
-        val allScanned = results.sortedByDescending { it.score }
-        
-        // Curate into 5 distinct non-overlapping categories as explicitly requested
-        val usedTickers = mutableSetOf<String>()
-
-        // 1. Select Best 5 Stocks with top breakouts
-        val top5BreakoutStocks = allScanned
+        // Sort pure Nifty 200 equity breakout results by technical score
+        results
             .filter { it.assetType == "EQUITY" }
             .sortedByDescending { it.score }
-            .take(5)
             .mapIndexed { idx, item ->
                 item.copy(
                     rank = idx + 1,
-                    categoryGroup = "Top 5 Breakout Stocks"
+                    categoryGroup = "Nifty 200 Breakout"
                 )
             }
-        top5BreakoutStocks.forEach { usedTickers.add(it.ticker.uppercase()) }
-
-        // 2. Select 2 Indices
-        val top2Indices = allScanned
-            .filter { it.assetType == "INDEX" && !usedTickers.contains(it.ticker.uppercase()) }
-            .sortedByDescending { it.score }
-            .take(2)
-            .mapIndexed { idx, item ->
-                item.copy(
-                    rank = idx + 1,
-                    categoryGroup = "Top 2 Indices"
-                )
-            }
-        top2Indices.forEach { usedTickers.add(it.ticker.uppercase()) }
-
-        // 3. Select 2 Commodities
-        val top2Commodities = allScanned
-            .filter { it.assetType == "COMMODITY" && !usedTickers.contains(it.ticker.uppercase()) }
-            .sortedByDescending { it.score }
-            .take(2)
-            .mapIndexed { idx, item ->
-                item.copy(
-                    rank = idx + 1,
-                    categoryGroup = "Top 2 Commodities"
-                )
-            }
-        top2Commodities.forEach { usedTickers.add(it.ticker.uppercase()) }
-
-        // 4. Select 5 Best BTST Stocks (equity stocks with high momentum not already used)
-        val top5BtstStocks = allScanned
-            .filter { 
-                it.assetType == "EQUITY" && 
-                !usedTickers.contains(it.ticker.uppercase())
-            }
-            .sortedByDescending { kotlin.math.abs(it.changePercent) * 20 + it.score }
-            .take(5)
-            .mapIndexed { idx, item ->
-                item.copy(
-                    rank = idx + 1,
-                    isBtst = true,
-                    categoryGroup = "5 Best BTST Stocks"
-                )
-            }
-        top5BtstStocks.forEach { usedTickers.add(it.ticker.uppercase()) }
-
-        // 5. Select 5 Best Weekly Stocks (equity stocks not already used)
-        val top5WeeklyStocks = allScanned
-            .filter { 
-                it.assetType == "EQUITY" && 
-                !usedTickers.contains(it.ticker.uppercase())
-            }
-            .sortedByDescending { it.score }
-            .take(5)
-            .mapIndexed { idx, item ->
-                item.copy(
-                    rank = idx + 1,
-                    categoryGroup = "5 Best Weekly Stocks"
-                )
-            }
-        top5WeeklyStocks.forEach { usedTickers.add(it.ticker.uppercase()) }
-
-        val curated = top5BreakoutStocks + top2Indices + top2Commodities + top5BtstStocks + top5WeeklyStocks
-        curated.mapIndexed { index, res ->
-            res.copy(rank = index + 1)
-        }
     }
 
     suspend fun getTop10Nifty200Breakouts(): List<ScanResult> {
