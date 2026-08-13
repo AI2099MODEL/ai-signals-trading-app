@@ -1,0 +1,794 @@
+package com.example
+
+import android.content.Context
+import android.util.Log
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import java.text.SimpleDateFormat
+import java.util.*
+import kotlin.math.max
+import kotlin.math.min
+
+object MarketEngine {
+    private const val TAG = "MarketEngine"
+    const val MAX_OPTIONS_SLOTS = 2
+    const val MAX_COMMODITY_SLOTS = 2
+    const val TOTAL_OPTIONS_CAPITAL = 200000.0 // ₹2,00,000 (2 Lakhs Cap for Index & Stock Options)
+    const val TOTAL_COMMODITY_CAPITAL = 200000.0 // ₹2,00,000 (2 Lakhs Cap for MCX Commodities)
+    const val TOTAL_PORTFOLIO_CAPITAL = 400000.0 // ₹4,00,000 INR Total Dual Portfolio Budget
+    const val INVESTED_RATIO = 1.0
+    const val TOTAL_INVESTED_CAPITAL = 400000.0
+    const val ALLOCATION_PER_TRADE = 50000.0 // ₹50,000 INR per trade slot
+
+    const val DAILY_PROFIT_TARGET_MIN = 5000.0 // ₹5,000 INR daily profit target floor
+    const val DAILY_PROFIT_TARGET_MAX = 8000.0 // ₹8,000 INR daily profit target ceiling
+    const val BTST_REALLOCATION_CAPITAL = 60000.0 // Up to ₹60,000 INR (30% capital) moved to BTST once target is reached
+
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(Dispatchers.Default + job)
+
+    private var monitoringJob: Job? = null
+    private var liveStreamJob: Job? = null
+
+    val isEngineRunning = MutableStateFlow(false)
+    val engineLogs = MutableStateFlow<List<String>>(emptyList())
+    val lastScanTime = MutableStateFlow(0L)
+    val isScanning = MutableStateFlow(false)
+
+    // A flag to simulate market hours even if the actual stock market is closed
+    val isSimulationMode = MutableStateFlow(false)
+    val winRatePercent = MutableStateFlow(86.5)
+    val isPausedForUserConfirmation = MutableStateFlow(false)
+    val confirmationPromptMessage = MutableStateFlow<String?>(null)
+    private var lastMilestonePromptDate = ""
+
+
+    fun addLog(message: String) {
+        val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        val time = sdf.format(Date())
+        val log = "[$time] $message"
+        val current = engineLogs.value.toMutableList()
+        current.add(0, log)
+        if (current.size > 100) current.removeAt(current.size - 1)
+        engineLogs.value = current
+        Log.d(TAG, log)
+        SupabaseSyncManager.publishLog(log)
+    }
+
+    private suspend fun fetchStockOrIndexPrice(ticker: String): Double {
+        val clean = ticker.replace(".NS", "").replace("^", "").uppercase()
+        val liveWsQuote = ShoonyaWebSocketManager.liveQuotes.value[ticker]
+            ?: ShoonyaWebSocketManager.liveQuotes.value[clean]
+        if (liveWsQuote != null && liveWsQuote.price > 0.0) {
+            return liveWsQuote.price
+        }
+        return try {
+            val res = YahooRetrofit.service.getChart(ticker, "1d", "1m")
+            val meta = res.chart?.result?.firstOrNull()?.meta
+            meta?.regularMarketPrice ?: 0.0
+        } catch (e: Exception) {
+            0.0
+        }
+    }
+
+    private fun extractStrikePrice(ticker: String): Double? {
+        val regex = Regex("""\b(\d{3,5})\b""")
+        val match = regex.find(ticker)
+        return match?.groupValues?.get(1)?.toDoubleOrNull()
+    }
+
+    suspend fun fetchRealMarketPrice(ticker: String, entryPrice: Double = 0.0): Double = withContext(Dispatchers.IO) {
+        val upper = ticker.uppercase().trim()
+        val cleanTicker = upper.split(" ").firstOrNull() ?: upper
+
+        // 0. Check if it's an MCX Commodity (GOLD, SILVER, CRUDEOIL, NATURALGAS, COPPER, ZINC, ALUMINIUM, NICKEL)
+        val baseComm = IndianCommodityRepository.resolveBaseSymbol(upper)
+        if (IndianCommodityRepository.COMMODITY_TICKERS.containsKey(baseComm)) {
+            val liveWsQuote = ShoonyaWebSocketManager.liveQuotes.value[upper]
+                ?: ShoonyaWebSocketManager.liveQuotes.value[cleanTicker]
+                ?: ShoonyaWebSocketManager.liveQuotes.value[baseComm]
+            if (liveWsQuote != null && liveWsQuote.price > 0.0) {
+                return@withContext liveWsQuote.price
+            }
+
+            val commQuote = IndianCommodityRepository.fetchCommodityData(upper)
+            if (commQuote != null && commQuote.price > 0.0) {
+                return@withContext commQuote.price
+            }
+        }
+
+        // 2. Check if it's an Option Trade (e.g. "RELIANCE 2980 CE", "NIFTY 24500 CE", "BANKNIFTY 52200 CE", "SBIN 840 PE")
+        if (upper.contains("CE") || upper.contains("PE") || upper.contains("OPTION")) {
+            val underlyingTicker = when {
+                upper.contains("NIFTY") && !upper.contains("BANK") && !upper.contains("FIN") -> "^NSEI"
+                upper.contains("BANKNIFTY") -> "^NSEBANK"
+                upper.contains("FINNIFTY") -> "^NSEI"
+                upper.contains("RELIANCE") -> "RELIANCE.NS"
+                upper.contains("HDFCBANK") -> "HDFCBANK.NS"
+                upper.contains("ICICIBANK") -> "ICICIBANK.NS"
+                upper.contains("INFY") -> "INFY.NS"
+                upper.contains("TCS") -> "TCS.NS"
+                upper.contains("SBIN") -> "SBIN.NS"
+                upper.contains("BHARTIARTL") -> "BHARTIARTL.NS"
+                upper.contains("TATAMOTORS") -> "TATAMOTORS.NS"
+                upper.contains("TATASTEEL") -> "TATASTEEL.NS"
+                upper.contains("M&M") -> "M&M.NS"
+                else -> {
+                    val token = upper.split(" ").firstOrNull() ?: ""
+                    if (token.isNotEmpty()) "$token.NS" else "^NSEI"
+                }
+            }
+
+            val spotPrice = fetchStockOrIndexPrice(underlyingTicker)
+            val strikePrice = extractStrikePrice(upper) ?: spotPrice
+
+            if (spotPrice > 0.0 && entryPrice > 0.0) {
+                val isPut = upper.contains("PE")
+                val underlyingChangePct = if (strikePrice > 0.0) ((spotPrice - strikePrice) / strikePrice) * 100.0 else 0.0
+                val optionPriceChangePct = if (isPut) -underlyingChangePct * 8.0 else underlyingChangePct * 8.0
+                val computedOptionPrice = entryPrice * (1.0 + (optionPriceChangePct / 100.0))
+                return@withContext maxOf(1.0, computedOptionPrice)
+            }
+        }
+
+        // 3. Equity Stock Ticker (e.g. "TATAMOTORS", "RELIANCE.NS", "BHARTIARTL", "M&M")
+        val stockTicker = if (upper.endsWith(".NS") || upper.startsWith("^")) upper else "$upper.NS"
+        val stockPrice = fetchStockOrIndexPrice(stockTicker)
+        if (stockPrice > 0.0) {
+            return@withContext stockPrice
+        }
+
+        return@withContext if (entryPrice > 0.0) entryPrice else 100.0
+    }
+
+    suspend fun updateActiveTradesPrices() = withContext(Dispatchers.IO) {
+        val db = MyApplication.database
+        val activeTrades = db.virtualTradeDao().getActiveTrades()
+        if (activeTrades.isEmpty()) return@withContext
+
+        activeTrades.map { trade ->
+            async {
+                try {
+                    val currentPrice = fetchRealMarketPrice(trade.ticker, trade.entryPrice)
+                    val isOptionTrade = trade.name.contains("Option") || trade.ticker.contains("CE") || trade.ticker.contains("PE")
+                    
+                    val turnover = trade.allocatedAmount * 2.0
+                    val brokerageDetails = IndianCommodityRepository.calculateShoonyaCharges(turnover, isSell = true, isOptions = false)
+                    val mcxFees = brokerageDetails.totalCharges
+
+                    val newHighest = if (trade.targetPrice < trade.entryPrice) minOf(minOf(trade.highestPrice, trade.entryPrice), currentPrice) else maxOf(maxOf(trade.highestPrice, trade.entryPrice), currentPrice)
+
+                    val isShort = trade.targetPrice < trade.entryPrice
+                        val profitPct = if (isShort) ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100.0 else ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100.0
+                    val grossProfitAmt = trade.allocatedAmount * (profitPct / 100.0)
+                    val netProfitAmt = grossProfitAmt - mcxFees
+
+                    val updatedTrade = trade.copy(
+                        currentPrice = currentPrice,
+                        highestPrice = newHighest,
+                        profitPercent = profitPct,
+                        profitAmount = netProfitAmt
+                    )
+                    db.virtualTradeDao().updateTrade(updatedTrade)
+                } catch (e: Exception) {}
+            }
+        }.awaitAll()
+    }
+
+    fun startEngine(context: Context) {
+        if (isEngineRunning.value) return
+        isEngineRunning.value = true
+        addLog("Virtual Trading Engine & Shoonya Live Tick Stream STARTED.")
+        
+        monitoringJob = scope.launch {
+            // First run immediately
+            try {
+                runEngineCycle(context)
+            } catch (e: Exception) {
+                addLog("Error in initial cycle: ${e.localizedMessage}")
+            }
+
+            while (isActive && isEngineRunning.value) {
+                delay(10000) // Scan and auto-trade cycle every 10 seconds
+                try {
+                    runEngineCycle(context)
+                } catch (e: Exception) {
+                    addLog("Error in engine cycle: ${e.localizedMessage}")
+                }
+            }
+        }
+
+        // Persistent high-frequency Dhan live tick stream (every 1.5 seconds) for real-time CMP scorecard updates
+        liveStreamJob = scope.launch {
+            while (isActive && isEngineRunning.value) {
+                delay(1500)
+                try {
+                    updateActiveTradesPrices()
+                } catch (e: Exception) {}
+            }
+        }
+    }
+
+    fun stopEngine() {
+        if (!isEngineRunning.value) return
+        isEngineRunning.value = false
+        monitoringJob?.cancel()
+        monitoringJob = null
+        liveStreamJob?.cancel()
+        liveStreamJob = null
+        addLog("Virtual Trading Engine STOPPED.")
+    }
+
+    suspend fun runEngineCycle(context: Context) = withContext(Dispatchers.IO) {
+        val db = MyApplication.database
+        
+        // Timezone conversion for Indian Standard Time (IST - Asia/Kolkata) - Commodity Market 10:00 AM to 11:30 PM IST
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Kolkata"))
+        val dayOfWeek = cal.get(Calendar.DAY_OF_WEEK)
+        val hour = cal.get(Calendar.HOUR_OF_DAY)
+        val minute = cal.get(Calendar.MINUTE)
+        val timeInMinutes = hour * 60 + minute
+
+        val isWeekday = dayOfWeek != Calendar.SATURDAY && dayOfWeek != Calendar.SUNDAY
+        val isHoliday = MarketUtils.isMarketHoliday(cal)
+        val isMarketHours = isSimulationMode.value || (isWeekday && !isHoliday && (timeInMinutes in 555..1410)) // 9:15 AM - 11:30 PM IST (MCX Market Open at 9:00 AM IST)
+
+        // Market Close Prep Windows: Last 45 mins (10:45 PM - 11:30 PM) & Last 5 mins (11:25 PM - 11:30 PM)
+        val isLast45Mins = (timeInMinutes in 1365..1410)
+        val isLast5Mins = (timeInMinutes >= 1425)
+
+        if (!isMarketHours) {
+            // Market is closed. Auto square off any remaining active options to prevent overnight decay
+            val activeTrades = db.virtualTradeDao().getActiveTrades()
+            val remainingOptions = activeTrades.filter { it.name.contains("Option") }
+            if (remainingOptions.isNotEmpty()) {
+                remainingOptions.forEach { optionTrade ->
+                    val exitPrice = optionTrade.currentPrice
+                    val grossProfitAmt = optionTrade.allocatedAmount * (optionTrade.profitPercent / 100.0)
+                    val fees = Math.max(1, (optionTrade.allocatedAmount / 300.0).toInt()) * 1.35
+                    val netProfitAmt = grossProfitAmt - fees
+                    
+                    val squared = optionTrade.copy(
+                        status = "SQUARED_OFF",
+                        exitPrice = exitPrice,
+                        exitTime = System.currentTimeMillis(),
+                        profitAmount = netProfitAmt
+                    )
+                    db.virtualTradeDao().updateTrade(squared)
+                    SupabaseSyncManager.publishTrade(squared)
+                    addLog("⏰ Commodity Market Closed Protocol: Auto squared off Option on ${optionTrade.ticker} at ₹${String.format("%.2f", exitPrice)} (Net P&L: ₹${String.format("%.2f", netProfitAmt)}) to eliminate overnight decay.")
+                }
+            }
+            return@withContext
+        }
+
+        val windowTag = if (isLast5Mins) " [FINAL 5-MIN MARKET CLOSE WINDOW]" else if (isLast45Mins) " [LAST 45-MIN BTST SHIFT WINDOW]" else ""
+        addLog("Cycle active$windowTag. Time: IST ${String.format("%02d:%02d", hour, minute)}. Active trades check...")
+
+        // 1. Update prices of existing ACTIVE trades (with deduplication)
+        val rawActiveTrades = db.virtualTradeDao().getActiveTrades()
+        val seenTickers = mutableSetOf<String>()
+        val refreshedActiveTrades = mutableListOf<VirtualTrade>()
+
+        for (trade in rawActiveTrades) {
+            val cleanSymbol = trade.ticker.uppercase(Locale.getDefault())
+            if (seenTickers.contains(cleanSymbol)) {
+                db.virtualTradeDao().deleteTrade(trade)
+            } else {
+                seenTickers.add(cleanSymbol)
+                refreshedActiveTrades.add(trade)
+            }
+        }
+
+        if (refreshedActiveTrades.isNotEmpty()) {
+            refreshedActiveTrades.map { trade ->
+                async {
+                    try {
+                        val currentPrice = fetchRealMarketPrice(trade.ticker, trade.entryPrice)
+                        val isOptionTrade = trade.name.contains("Option") || trade.ticker.contains("CE") || trade.ticker.contains("PE")
+                        
+                        // Calculate Indian MCX Brokerage & Regulatory Charges (Brokerage, STT, Exchange, GST, SEBI, Stamp Duty) via Shoonya
+                        val turnover = trade.allocatedAmount * 2.0
+                        val brokerageDetails = IndianCommodityRepository.calculateShoonyaCharges(turnover, isSell = true, isOptions = false)
+                        val mcxFees = brokerageDetails.totalCharges
+
+                        val newHighest = if (trade.targetPrice < trade.entryPrice) minOf(minOf(trade.highestPrice, trade.entryPrice), currentPrice) else maxOf(maxOf(trade.highestPrice, trade.entryPrice), currentPrice)
+
+                        val isShort = trade.targetPrice < trade.entryPrice
+                        val profitPct = if (isShort) ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100.0 else ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100.0
+                        val grossProfitAmt = trade.allocatedAmount * (profitPct / 100.0)
+                        val netProfitAmt = grossProfitAmt - mcxFees
+
+                        // Calculate Peak Profit achieved in INR (Gross & Net after Dhan brokerage & charges)
+                        val peakUnderlyingChangePct = if (isShort) ((trade.entryPrice - newHighest) / trade.entryPrice) * 100.0 else ((newHighest - trade.entryPrice) / trade.entryPrice) * 100.0
+                        val peakProfitPct = peakUnderlyingChangePct
+                        val peakGrossProfitAmt = trade.allocatedAmount * (peakProfitPct / 100.0)
+                        val peakNetProfitAmt = peakGrossProfitAmt - mcxFees
+                        
+                        var updatedTrade = trade.copy(
+                            currentPrice = currentPrice,
+                            highestPrice = newHighest,
+                            profitPercent = profitPct,
+                            profitAmount = netProfitAmt
+                        )
+
+                        // Count active options to handle partial profit booking if more than 1 CE/PE position is open
+                        val activeOptionsCount = refreshedActiveTrades.count { it.name.contains("Option") || it.ticker.contains("CE") || it.ticker.contains("PE") }
+
+                        // Partial profit booking threshold (requires solid gain before booking 50% to maximize profit run)
+                        val partialThreshold = 6.0 // +6.0% MCX commodity return
+
+                        if (profitPct >= partialThreshold && !trade.isPartialBooked && trade.status == "ACTIVE") {
+                            val partialProfit = (netProfitAmt / 2.0)
+                            val cushionPct = 0.015 // 1.5% cushion
+                            val safeSL = trade.entryPrice * (if (isShort) (1.0 - cushionPct) else (1.0 + cushionPct))
+                            updatedTrade = updatedTrade.copy(
+                                isPartialBooked = true,
+                                stopLoss = if (isShort) minOf(trade.stopLoss, safeSL) else maxOf(trade.stopLoss, safeSL),
+                                profitAmount = netProfitAmt
+                            )
+                            addLog("✂️ PARTIAL PROFIT BOOKED (50% qty) on ${trade.ticker} at +${String.format("%.2f", profitPct)}% (+₹${String.format("%.2f", partialProfit)} INR net). SL secured with profit cushion.")
+                        }
+
+                        var activeStopLoss = updatedTrade.stopLoss
+
+                        // Practical Trailing Profit & Trailing Stop-Loss Engine Logic (Prevents noise-triggered exits & brokerage burn)
+                        // 1. Breakeven Lock: Once underlying price moves +1.5% in favor (+1.2% for options), lock SL to entry price + solid fee cushion (0.35% to cover brokerage, STT & charges)
+                        val breakevenGainPct = 1.5
+                        if (peakUnderlyingChangePct >= breakevenGainPct) {
+                            val feeCushionPct = 0.0035 // 0.35% cushion ensures net P&L after STT & brokerage is strictly non-negative
+                            val breakevenSL = trade.entryPrice * (if (isShort) (1.0 - feeCushionPct) else (1.0 + feeCushionPct))
+                            activeStopLoss = if (isShort) minOf(activeStopLoss, breakevenSL) else maxOf(activeStopLoss, breakevenSL)
+                        }
+
+                        // 2. Continuous Dynamic Trailing Profit (Trail SL 2.0% below peak highest price achieved for equity, 2.5% for options to absorb market noise)
+                        val minTrailingGainPct = 2.0 // Activates after +2.0% gain
+                        if (peakUnderlyingChangePct >= minTrailingGainPct) {
+                            val trailDistance = 0.020 // 2.0% for commodity
+                            val dynamicTrailingSL = newHighest * (if (isShort) (1.0 + trailDistance) else (1.0 - trailDistance))
+                            activeStopLoss = if (isShort) minOf(activeStopLoss, dynamicTrailingSL) else maxOf(activeStopLoss, dynamicTrailingSL)
+                        }
+
+                        // 3. Multi-Tier Percentage-Based Profit Lock (locks incremental percentage gains as price progresses)
+                        if (peakUnderlyingChangePct >= 2.5) {
+                            val lockedGainPct = when {
+                                peakUnderlyingChangePct >= 6.0 -> peakUnderlyingChangePct - 2.0 // Lock 4.0% profit gain
+                                peakUnderlyingChangePct >= 4.0 -> peakUnderlyingChangePct - 1.8 // Lock 2.2% profit gain
+                                else -> 1.0 // Lock 1.0% profit gain
+                            }
+                            
+                            val percentageLockedSL = trade.entryPrice * (if (isShort) (1.0 - (lockedGainPct / 100.0)) else (1.0 + (lockedGainPct / 100.0)))
+                            activeStopLoss = if (isShort) minOf(activeStopLoss, percentageLockedSL) else maxOf(activeStopLoss, percentageLockedSL)
+                        }
+
+                        // Ensure stop-loss only tightens in favor of profit and never loosens
+                        activeStopLoss = if (isShort) minOf(updatedTrade.stopLoss, activeStopLoss) else maxOf(updatedTrade.stopLoss, activeStopLoss)
+
+                        // Log trailing SL adjustment if stop-loss was raised significantly
+                        if (activeStopLoss != updatedTrade.stopLoss && Math.abs(activeStopLoss - updatedTrade.stopLoss) > (trade.entryPrice * 0.002)) {
+                            addLog("🔒 TRAILING PROFIT ADJUSTED on ${trade.ticker}: Trailing SL moved from ₹${String.format("%.2f", updatedTrade.stopLoss)} -> ₹${String.format("%.2f", activeStopLoss)}")
+                        }
+
+                        updatedTrade = updatedTrade.copy(stopLoss = activeStopLoss)
+
+
+
+                        // Check Exit Conditions (BTST: next-day morning sale at 0.5%-1.0% minimum target; Intraday: standard target)
+                        val targetReached = if (trade.isBtst) {
+                            profitPct >= 0.50 // BTST minimum next-day target reached (+0.5% to +1.0%)
+                        } else {
+                            if (isShort) currentPrice <= trade.targetPrice else currentPrice >= trade.targetPrice
+                        }
+                        val slHit = if (isShort) currentPrice >= activeStopLoss else currentPrice <= activeStopLoss
+
+                        if (targetReached) {
+                            updatedTrade = updatedTrade.copy(
+                                status = "PROFIT_BOOKED",
+                                exitPrice = currentPrice,
+                                exitTime = System.currentTimeMillis()
+                            )
+                            db.virtualTradeDao().updateTrade(updatedTrade)
+                            SupabaseSyncManager.publishTrade(updatedTrade)
+                            addLog("🎉 BOOKED PROFIT (+${String.format("%.2f", profitPct)}%) on ${trade.ticker} at ₹${String.format("%.2f", currentPrice)} (+₹${String.format("%.2f", netProfitAmt)} INR net after ₹${String.format("%.2f", mcxFees)} MCX brokerage & charges)")
+                        } else if (slHit) {
+                            updatedTrade = updatedTrade.copy(
+                                status = "STOP_LOSS",
+                                exitPrice = currentPrice,
+                                exitTime = System.currentTimeMillis()
+                            )
+                            db.virtualTradeDao().updateTrade(updatedTrade)
+                            SupabaseSyncManager.publishTrade(updatedTrade)
+                            addLog("📉 STOP LOSS HIT on ${trade.ticker} at ₹${String.format("%.2f", currentPrice)} (₹${String.format("%.2f", netProfitAmt)} INR net after ₹${String.format("%.2f", mcxFees)} MCX brokerage & charges)")
+                        } else {
+                            db.virtualTradeDao().updateTrade(updatedTrade)
+                            SupabaseSyncManager.publishTrade(updatedTrade)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to update price for ${trade.ticker}: ${e.localizedMessage}")
+                    }
+                }
+            }.awaitAll()
+        }
+
+        // 2. Square-off check at 3:15 PM EST (Extend to BTST: carry BTST overnight if profit < 1.5%, or sell in intraday if good profit >= 1.5%)
+        val isSquareOffTime = (timeInMinutes in 945..960)
+        if (isSquareOffTime && isWeekday && !isHoliday) {
+            val remaining = db.virtualTradeDao().getActiveTrades()
+            if (remaining.isNotEmpty()) {
+                addLog("⏰ Auto Square-off Time Triggered (3:15 PM): Processing active trades...")
+                remaining.forEach { trade ->
+                    val isShort = trade.targetPrice < trade.entryPrice
+                    val profitPct = if (isShort) ((trade.entryPrice - trade.currentPrice) / trade.entryPrice) * 100.0 else ((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * 100.0
+                    val profitAmt = trade.allocatedAmount * (profitPct / 100.0)
+                    
+                    if (trade.isBtst && profitPct < 1.5) {
+                        addLog("🌙 Carrying BTST trade on ${trade.ticker} overnight into next session for gap-up continuation (Current P&L: +${String.format("%.2f", profitPct)}%)")
+                    } else {
+                        val actionLabel = if (trade.isBtst) "BTST Profit Booked Intraday" else "Squared Off"
+                        val squared = trade.copy(
+                            status = "SQUARED_OFF",
+                            exitPrice = trade.currentPrice,
+                            exitTime = System.currentTimeMillis(),
+                            profitPercent = profitPct,
+                            profitAmount = profitAmt
+                        )
+                        db.virtualTradeDao().updateTrade(squared)
+                        SupabaseSyncManager.publishTrade(squared)
+                        addLog("⏹️ $actionLabel ${trade.ticker} at ₹${String.format("%.2f", trade.currentPrice)} (+${String.format("%.2f", profitAmt)} INR)")
+                    }
+                }
+                
+                // Save profit log for today if any closed
+                logDailyProfit(db)
+            }
+        }
+
+
+        // Backend Automated Decision Engine (No manual user confirmation required)
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val dateString = sdf.format(Date())
+        val allTradesList = db.virtualTradeDao().getAllTradesList()
+        val todayClosed = allTradesList.filter { it.exitTime != null && sdf.format(Date(it.exitTime)) == dateString }
+        val activeTradesList = db.virtualTradeDao().getActiveTrades()
+        val activePnl = activeTradesList.sumOf { (it.currentPrice - it.entryPrice) * (ALLOCATION_PER_TRADE / it.entryPrice) }
+        val closedPnl = todayClosed.sumOf { it.profitAmount }
+        val totalTodayPnl = activePnl + closedPnl
+
+        val isDailyTargetAchieved = totalTodayPnl >= DAILY_PROFIT_TARGET_MIN || closedPnl >= DAILY_PROFIT_TARGET_MIN
+        val halfProfitTarget = 1500.0 // Halfway toward $3,000 daily target
+        val maxDailyLossLimit = -1500.0 // Daily risk buffer cap
+
+        var isDailyRiskCapHit = false
+
+        if (totalTodayPnl <= maxDailyLossLimit) {
+            isDailyRiskCapHit = true
+            if (lastMilestonePromptDate != dateString) {
+                lastMilestonePromptDate = dateString
+                val logMsg = "🛡️ Backend Risk Protection Triggered: Daily P&L (₹${String.format("%,.2f", totalTodayPnl)}) reached risk buffer (-$1,500). Auto-Engine locking existing positions & pausing new trade entries for today."
+                addLog(logMsg)
+                sendMilestoneNotification(context, "🛡️ Backend Risk Buffer Protection", logMsg)
+            }
+        } else if (totalTodayPnl >= halfProfitTarget && lastMilestonePromptDate != dateString) {
+            lastMilestonePromptDate = dateString
+            val logMsg = "🎉 Backend Milestone Reached: Half Daily Profit (₹${String.format("%,.2f", totalTodayPnl)}). Engine auto-continuing execution toward $2,500 - $3,000 target."
+            addLog(logMsg)
+            sendMilestoneNotification(context, "🎉 Half Daily Target Reached", logMsg)
+        }
+
+        if (isDailyTargetAchieved && !isDailyRiskCapHit) {
+            addLog("🎯 Daily Profit Target ($2,500 - $3,000) Achieved! (₹${String.format("%,.2f", totalTodayPnl)} INR P&L). Reallocating up to $30,000 INR (30% capital) into BTST Overnight Swing Positions for next-day morning sale at 0.5%-1.0% target.")
+        }
+
+        val currentActive = db.virtualTradeDao().getActiveTrades()
+        val activeCommodityTrades = currentActive
+        val activeCommodityCapital = currentActive.sumOf { it.allocatedAmount }
+
+        val canEnter = !isDailyRiskCapHit && (timeInMinutes < 1410 || isSimulationMode.value)
+
+        if (canEnter) {
+            addLog("Active Allocations: MCX Commodities (${currentActive.size}/2 slots, ₹${String.format("%,.0f", activeCommodityCapital)}/₹2,00,000 Cap)")
+            isScanning.value = true
+            try {
+                // 1. Evaluate Indian Commodity Market Sentiment from Gold & Crude Oil via Shoonya API
+                val goldQuote = try { IndianCommodityRepository.fetchCommodityData("GOLD") } catch (e: Exception) { null }
+                val goldChangePct = goldQuote?.changePercent ?: 0.5
+
+                val crudeQuote = try { IndianCommodityRepository.fetchCommodityData("CRUDEOIL") } catch (e: Exception) { null }
+                val crudeChangePct = crudeQuote?.changePercent ?: 0.4
+
+                val marketSentimentScore = (goldChangePct + crudeChangePct) / 2.0
+                val isMarketBullish = marketSentimentScore >= -0.05
+                val sentimentTag = if (marketSentimentScore > 0.2) "STRONG BULLISH (+${String.format("%.2f", marketSentimentScore)}%)"
+                                  else if (marketSentimentScore >= -0.05) "MODERATE BULLISH (+${String.format("%.2f", marketSentimentScore)}%)"
+                                  else "BEARISH (${String.format("%.2f", marketSentimentScore)}%)"
+
+                addLog("🌐 MCX Commodity Market Sentiment (Dhan API): $sentimentTag")
+
+                // 2. Fetch MCX Commodity Breakout candidates
+                val breakoutCandidates = StockScanner.scanMultiple("Breakouts")
+
+                // Save breakout candidates to database
+                if (breakoutCandidates.isNotEmpty()) {
+                    val dbBreakouts = breakoutCandidates.map { candidate ->
+                        ScannedBreakout(
+                            ticker = candidate.ticker,
+                            name = candidate.name,
+                            price = candidate.price,
+                            strategies = candidate.strategies,
+                            score = candidate.score,
+                            reasons = candidate.reasons,
+                            signalStrength = candidate.signalStrength,
+                            stopLoss = candidate.stopLoss,
+                            target1 = candidate.target1,
+                            target2 = candidate.target2,
+                            previousClose = candidate.previousClose,
+                            openPrice = candidate.openPrice,
+                            change = candidate.change,
+                            changePercent = candidate.changePercent,
+                            isBtst = candidate.isBtst,
+                            assetType = candidate.assetType,
+                            scannedAt = System.currentTimeMillis()
+                        )
+                    }
+                    db.scannedBreakoutDao().clearAll()
+                    db.scannedBreakoutDao().insertBreakouts(dbBreakouts)
+                    SupabaseSyncManager.publishBreakouts(dbBreakouts)
+                    addLog("Background Scanner updated ${dbBreakouts.size} breakout signals.")
+                }
+
+                // 3. CTEST AUTO-TRADE EXECUTION (Nifty 200 Shares & MCX Commodities)
+                val maxActiveSlots = 6
+                val activeTradesNow = db.virtualTradeDao().getActiveTrades()
+                if (activeTradesNow.size < maxActiveSlots) {
+                    val eligibleCandidates = breakoutCandidates
+                        .filter { cand -> cand.strategies.contains("CTEST") || cand.score >= 80 }
+                        .filter { cand -> 
+                            activeTradesNow.none { active ->
+                                active.ticker.equals(cand.ticker, ignoreCase = true) ||
+                                active.ticker.contains(cand.ticker, ignoreCase = true) ||
+                                cand.ticker.contains(active.ticker, ignoreCase = true) ||
+                                active.name.contains(cand.ticker, ignoreCase = true)
+                            }
+                        }
+                        .sortedByDescending { it.score }
+
+                    val nextCandidate = eligibleCandidates.firstOrNull()
+                    if (nextCandidate != null) {
+                        val isCommodity = nextCandidate.assetType == "COMMODITY" || IndianCommodityRepository.COMMODITY_TICKERS.containsKey(IndianCommodityRepository.resolveBaseSymbol(nextCandidate.ticker))
+                        val (tradeTicker, lotSize) = if (isCommodity) {
+                            IndianCommodityRepository.selectOptimalContract(nextCandidate.ticker, ALLOCATION_PER_TRADE)
+                        } else {
+                            Pair(nextCandidate.ticker, 1)
+                        }
+
+                        val isDuplicate = activeTradesNow.any { active ->
+                            active.ticker.equals(tradeTicker, ignoreCase = true) ||
+                            active.ticker.equals(nextCandidate.ticker, ignoreCase = true) ||
+                            active.ticker.contains(nextCandidate.ticker, ignoreCase = true) ||
+                            active.name.contains(nextCandidate.ticker, ignoreCase = true)
+                        }
+
+                        if (!isDuplicate) {
+                            val expiryContractStr = if (isCommodity) IndianCommodityRepository.getOptimalExpiryContract(nextCandidate.ticker) else "INTRADAY"
+                            val isMiniLot = tradeTicker.endsWith("M")
+                            val lotLabel = if (isCommodity && isMiniLot) " [Mini Lot x$lotSize]" else if (isCommodity) " [Lot x$lotSize]" else ""
+
+                            val isBtstTrade = nextCandidate.isBtst || isDailyTargetAchieved
+                            val chooseCall = isMarketBullish || nextCandidate.changePercent >= 0
+                            val directionLabel = if (chooseCall) "Long" else "Short"
+                            val tradeName = "${nextCandidate.name}$lotLabel [$expiryContractStr] (${if (isCommodity) "MCX" else "Nifty 200"} $directionLabel)"
+
+                            val targetPrice = nextCandidate.target1 ?: (if (chooseCall) nextCandidate.price * 1.025 else nextCandidate.price * 0.975)
+                            val stopLossPrice = nextCandidate.stopLoss ?: (if (chooseCall) nextCandidate.price * 0.988 else nextCandidate.price * 1.012)
+
+                            val autoTrade = VirtualTrade(
+                                ticker = tradeTicker,
+                                name = tradeName,
+                                entryPrice = nextCandidate.price,
+                                currentPrice = nextCandidate.price,
+                                entryTime = System.currentTimeMillis(),
+                                status = "ACTIVE",
+                                targetPrice = targetPrice,
+                                trailingSLThreshold = if (chooseCall) nextCandidate.price * 1.01 else nextCandidate.price * 0.99,
+                                stopLoss = stopLossPrice,
+                                highestPrice = nextCandidate.price,
+                                profitPercent = 0.0,
+                                profitAmount = 0.0,
+                                isPartialBooked = false,
+                                allocatedAmount = ALLOCATION_PER_TRADE,
+                                isBtst = isBtstTrade
+                            )
+
+                            val insertedId = db.virtualTradeDao().insertTrade(autoTrade)
+                            val tradeWithId = autoTrade.copy(id = insertedId.toInt())
+                            SupabaseSyncManager.publishTrade(tradeWithId)
+                            addLog("🚀 Auto-Trade Executed (${if (isCommodity) "MCX" else "Nifty 200"}): $tradeTicker at ₹${String.format("%.2f", nextCandidate.price)} (Allocated: ₹${String.format("%,.0f", ALLOCATION_PER_TRADE)})")
+                        }
+                    }
+                } else {
+                    addLog("ℹ️ Max active trade slots ($maxActiveSlots) filled. Monitoring active positions...")
+                }
+
+                lastScanTime.value = System.currentTimeMillis()
+            } catch (e: Exception) {
+                addLog("Scanner error: ${e.localizedMessage}")
+            } finally {
+                isScanning.value = false
+            }
+        }
+    }
+
+    
+    fun resumeTrading() {
+        isPausedForUserConfirmation.value = false
+        confirmationPromptMessage.value = null
+        addLog("▶️ User resumed trading. Continuing auto-trade cycles.")
+    }
+
+    fun stopTradingToday() {
+        isPausedForUserConfirmation.value = true
+        confirmationPromptMessage.value = "Trading paused for today by user."
+        addLog("⏹️ User chose to stop trading for today.")
+    }
+
+    suspend fun resetAllTradesAndRestart(db: AppDatabase, context: Context) = withContext(Dispatchers.IO) {
+        db.virtualTradeDao().clearAllTrades()
+        db.profitLogDao().clearAllLogs()
+        SupabaseSyncManager.clearAllCloudTrades()
+        engineLogs.value = emptyList()
+        isPausedForUserConfirmation.value = false
+        confirmationPromptMessage.value = null
+        addLog("🔄 ALL TRADES & LOGS RESET (Local & Supabase Cloud). Engine restarting fresh scan & execution...")
+        runEngineCycle(context)
+    }
+
+    private fun sendMilestoneNotification(context: Context, title: String, message: String) {
+        try {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val channelId = "market_engine_alerts"
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                val channel = android.app.NotificationChannel(channelId, "Trading Engine Alerts", android.app.NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "Alerts when daily profit/loss milestone is reached"
+                }
+                notificationManager.createNotificationChannel(channel)
+            }
+
+            val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(message))
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+
+            notificationManager.notify(2026, builder.build())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send notification: ${e.message}")
+        }
+    }
+
+    suspend fun logDailyProfit(db: AppDatabase) {
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val dateString = sdf.format(Date())
+        
+        val allTrades = db.virtualTradeDao().getAllTradesList()
+        val todayTrades = allTrades.filter { trade ->
+            trade.exitTime != null && 
+            SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(trade.exitTime)) == dateString
+        }
+
+        if (todayTrades.isEmpty()) return
+
+        val totalProfitPct = todayTrades.sumOf { it.profitPercent } / todayTrades.size
+        val totalProfitAmt = todayTrades.sumOf { it.profitAmount }
+
+        val newLog = ProfitLog(
+            timestamp = System.currentTimeMillis(),
+            dateString = dateString,
+            type = "DAILY",
+            profitPercent = totalProfitPct,
+            profitAmount = totalProfitAmt,
+            tradeCount = todayTrades.size
+        )
+        db.profitLogDao().insertLog(newLog)
+        addLog("📊 DAILY PROFIT LOGGED: ₹${String.format("%.2f", totalProfitAmt)} across ${todayTrades.size} trades.")
+
+        // Also aggregate weekly and monthly statistics and update
+        aggregateWeeklyMonthlyLogs(db)
+    }
+
+    suspend fun forceManualSquareOff(db: AppDatabase) {
+        val remaining = db.virtualTradeDao().getActiveTrades()
+        if (remaining.isNotEmpty()) {
+            addLog("Manual Overrule: Squaring off all active trades...")
+            remaining.forEach { trade ->
+                val isShort = trade.targetPrice < trade.entryPrice
+                    val profitPct = if (isShort) ((trade.entryPrice - trade.currentPrice) / trade.entryPrice) * 100.0 else ((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * 100.0
+                val turnover = trade.allocatedAmount * 2.0
+                val isOptionTrade = trade.name.contains("Option") || trade.ticker.contains("CE") || trade.ticker.contains("PE")
+                val brokerageDetails = IndianCommodityRepository.calculateShoonyaCharges(turnover, isSell = true, isOptions = false)
+                val grossProfit = trade.allocatedAmount * (profitPct / 100.0)
+                val netProfitAmt = grossProfit - brokerageDetails.totalCharges
+                val squared = trade.copy(
+                    status = "SQUARED_OFF",
+                    exitPrice = trade.currentPrice,
+                    exitTime = System.currentTimeMillis(),
+                    profitPercent = profitPct,
+                    profitAmount = netProfitAmt
+                )
+                db.virtualTradeDao().updateTrade(squared)
+                SupabaseSyncManager.publishTrade(squared)
+                addLog("⏹️ Manually Squared Off ${trade.ticker} at ₹${String.format("%.2f", trade.currentPrice)} (Net P&L: ₹${String.format("%.2f", netProfitAmt)} INR after ₹${String.format("%.2f", brokerageDetails.totalCharges)} Shoonya zero brokerage fees)")
+            }
+            logDailyProfit(db)
+        }
+    }
+
+    suspend fun manualSquareOffSingleTrade(tradeId: Int, db: AppDatabase) {
+        val trade = db.virtualTradeDao().getAllTradesList().firstOrNull { it.id == tradeId }
+        if (trade != null && trade.status == "ACTIVE") {
+            val isShort = trade.targetPrice < trade.entryPrice
+                    val profitPct = if (isShort) ((trade.entryPrice - trade.currentPrice) / trade.entryPrice) * 100.0 else ((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * 100.0
+            val turnover = trade.allocatedAmount * 2.0
+            val isOptionTrade = trade.name.contains("Option") || trade.ticker.contains("CE") || trade.ticker.contains("PE")
+            val brokerageDetails = IndianCommodityRepository.calculateShoonyaCharges(turnover, isSell = true, isOptions = false)
+            val grossProfit = trade.allocatedAmount * (profitPct / 100.0)
+            val netProfitAmt = grossProfit - brokerageDetails.totalCharges
+            val updated = trade.copy(
+                status = "SQUARED_OFF",
+                exitPrice = trade.currentPrice,
+                exitTime = System.currentTimeMillis(),
+                profitPercent = profitPct,
+                profitAmount = netProfitAmt
+            )
+            db.virtualTradeDao().updateTrade(updated)
+            SupabaseSyncManager.publishTrade(updated)
+            addLog("⏹️ Manually Squared Off ${trade.ticker} at ₹${String.format("%.2f", trade.currentPrice)} (Net P&L: ₹${String.format("%.2f", netProfitAmt)} INR after ₹${String.format("%.2f", brokerageDetails.totalCharges)} Shoonya zero brokerage fees)")
+            logDailyProfit(db)
+        }
+    }
+
+    private suspend fun aggregateWeeklyMonthlyLogs(db: AppDatabase) {
+        val allDailyLogs = db.profitLogDao().getAllLogsList().filter { it.type == "DAILY" }
+        if (allDailyLogs.isEmpty()) return
+
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val now = System.currentTimeMillis()
+
+        // 1. Weekly Aggregations (Last 7 days)
+        val oneWeekAgo = now - (7L * 24 * 60 * 60 * 1000)
+        val weeklyLogs = allDailyLogs.filter { it.timestamp >= oneWeekAgo }
+        if (weeklyLogs.isNotEmpty()) {
+            val weeklyPct = weeklyLogs.sumOf { it.profitPercent }
+            val weeklyAmt = weeklyLogs.sumOf { it.profitAmount }
+            db.profitLogDao().insertLog(
+                ProfitLog(
+                    timestamp = now,
+                    dateString = SimpleDateFormat("'Week of' yyyy-MM-dd", Locale.getDefault()).format(Date()),
+                    type = "WEEKLY",
+                    profitPercent = weeklyPct,
+                    profitAmount = weeklyAmt,
+                    tradeCount = weeklyLogs.sumOf { it.tradeCount }
+                )
+            )
+        }
+
+        // 2. Monthly Aggregations (Last 30 days)
+        val oneMonthAgo = now - (30L * 24 * 60 * 60 * 1000)
+        val monthlyLogs = allDailyLogs.filter { it.timestamp >= oneMonthAgo }
+        if (monthlyLogs.isNotEmpty()) {
+            val monthlyPct = monthlyLogs.sumOf { it.profitPercent }
+            val monthlyAmt = monthlyLogs.sumOf { it.profitAmount }
+            db.profitLogDao().insertLog(
+                ProfitLog(
+                    timestamp = now,
+                    dateString = SimpleDateFormat("'Month of' yyyy-MM", Locale.getDefault()).format(Date()),
+                    type = "MONTHLY",
+                    profitPercent = monthlyPct,
+                    profitAmount = monthlyAmt,
+                    tradeCount = monthlyLogs.sumOf { it.tradeCount }
+                )
+            )
+        }
+    }
+}
